@@ -73,6 +73,10 @@ def main():
             print(f"ERROR: {label} report not found: {path}")
             sys.exit(1)
 
+    logger.info("DDR Report Generator started")
+    logger.info(f"Inspection file: {args.inspection}")
+    logger.info(f"Thermal file: {args.thermal}")
+
     print("=" * 60)
     print("  DDR Report Generator")
     print("=" * 60)
@@ -82,6 +86,7 @@ def main():
     print("[1/4] Extracting text from PDFs...")
     try:
         inspection_data = extract_inspection_report(args.inspection)
+        logger.info(f"Inspection report extracted: {len(inspection_data.get('impacted_areas', []))} impacted areas found")
         print(f"  ✓ Inspection report: {len(inspection_data.get('impacted_areas', []))} impacted areas found")
     except Exception as e:
         logger.error(f"Failed to extract inspection report: {str(e)}")
@@ -91,6 +96,7 @@ def main():
 
     try:
         thermal_data = extract_thermal_report(args.thermal)
+        logger.info(f"Thermal report extracted: {thermal_data.get('num_images', 0)} thermal readings found")
         print(f"  ✓ Thermal report: {thermal_data.get('num_images', 0)} thermal readings found")
     except Exception as e:
         logger.error(f"Failed to extract thermal report: {str(e)}")
@@ -110,6 +116,7 @@ def main():
     if missing:
         print(f"  ℹ {len(missing)} piece(s) of missing info noted")
 
+    logger.info(f"Data merged: {len(formatted_data):,} characters, {len(conflicts)} conflict(s), {len(missing)} missing info")
     print(f"  ✓ Merged data: {len(formatted_data):,} characters")
 
     # Step 3: Generate
@@ -126,6 +133,7 @@ def main():
 
     report_text = result["report"]
     meta = result["metadata"]
+    logger.info(f"Report generated: {meta['output_chars']:,} chars in {meta['generation_time_seconds']}s")
     print(f"  ✓ Report generated ({meta['output_chars']:,} chars, {meta['generation_time_seconds']}s)")
 
     if result.get("validation"):
@@ -157,12 +165,14 @@ def main():
             f.write(result["validation"])
         print(f"  ✓ Validation saved to: {val_path}")
 
+    logger.info(f"Report saved: {output_files}")
     print()
     print("=" * 60)
     print("  Done! Output files:")
     for fp in output_files:
         print(f"    → {fp}")
     print("=" * 60)
+    logger.info("DDR Report Generator completed successfully")
 
 
 if __name__ == "__main__":

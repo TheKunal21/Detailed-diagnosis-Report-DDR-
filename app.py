@@ -113,11 +113,14 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
 
         try:
             # step 1: extract
+            logger.info("Step 1: Extracting text from PDFs...")
             progress.progress(10, text="Extracting text from Inspection Report...")
             inspection_data = extract_inspection_report(insp_path)
+            logger.info(f"Inspection report extracted: {len(inspection_data.get('impacted_areas', []))} impacted areas")
 
             progress.progress(25, text="Extracting text from Thermal Report...")
             thermal_data = extract_thermal_report(therm_path)
+            logger.info(f"Thermal report extracted: {thermal_data.get('num_images', 0)} readings")
 
             # show extraction stats
             with st.expander("📊 Extraction Summary", expanded=False):
@@ -128,9 +131,11 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
                     st.metric("Thermal Readings", thermal_data.get("num_images", 0))
 
             # step 2: merge & process
+            logger.info("Step 2: Merging and processing data...")
             progress.progress(40, text="Merging and processing data...")
             merged = merge_inspection_and_thermal(inspection_data, thermal_data)
             formatted_data = format_merged_data_for_llm(merged)
+            logger.info(f"Data merged: {len(formatted_data):,} characters")
 
             # show merged data (collapsed)
             with st.expander("🔍 Processed Data (for debugging)", expanded=False):
@@ -146,8 +151,10 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
                 st.info(f"ℹ️ {len(merged['missing_info'])} piece(s) of missing information detected")
 
             # step 3: generate with LLM
+            logger.info("Step 3: Generating DDR report with LLM...")
             progress.progress(55, text="Generating DDR report with AI (this takes ~20-30 seconds)...")
             result = generate_ddr(formatted_data, api_key=api_key, validate=run_validation)
+            logger.info(f"Report generated: {result['metadata']['output_chars']:,} chars in {result['metadata']['generation_time_seconds']}s")
 
             progress.progress(90, text="Formatting output...")
 
@@ -209,6 +216,7 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
                     logger.info(f"PDF generation failed: {str(e)}. Falling back to Markdown download.")
                     raise DDRException(f"PDF generation failed: {str(e)}", sys)
 
+            logger.info("DDR report generation completed successfully")
             progress.progress(100, text="Done! ✓")
 
         except DDRException as e:

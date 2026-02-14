@@ -145,6 +145,17 @@ def extract_inspection_report(pdf_path: str) -> dict:
         "summary_table": _extract_summary_table(cleaned),
     }
 
+    # warn if nothing meaningful was extracted
+    if not sections["impacted_areas"] and sections["site_details"] == cleaned[:800]:
+        # extraction fell through to fallbacks — pass raw text so LLM can still work
+        sections["impacted_areas"] = [{
+            "area_number": 1,
+            "description": cleaned[:2000],
+            "negative_side": "Not Available",
+            "positive_side": "Not Available",
+            "raw_content": cleaned[:2000],
+        }]
+
     return sections
 
 
@@ -169,10 +180,13 @@ def extract_thermal_report(pdf_path: str) -> dict:
 
 def _extract_site_details(text: str) -> str:
     """Pull out the site/property details section."""
-    # look for the block between Customer Name and the first Impacted Area
+    # look for the block between common header markers and the first area/checklist section
+    # widened to handle various report formats
     patterns = [
-        r'(Customer\s*Name.*?(?=Impacted\s*Area|Checklists|$))',
-        r'(Inspection\s*Form.*?(?=Impacted\s*Area|Checklists|$))',
+        r'(Customer\s*Name.*?(?=Impacted\s*Area|Affected\s*Area|Observation\s*Area|Area\s*(?:of\s*)?(?:Concern|Inspection)|Checklists?|Check\s*List|Findings|$))',
+        r'(Inspection\s*(?:Form|Report|Details?).*?(?=Impacted\s*Area|Affected\s*Area|Observation|Area\s*\d|Checklists?|$))',
+        r'((?:Site|Property|Project)\s*(?:Details?|Information|Info).*?(?=Impacted\s*Area|Affected\s*Area|Observation|Area\s*\d|Checklists?|$))',
+        r'((?:Client|Owner)\s*(?:Name|Details?).*?(?=Impacted\s*Area|Affected\s*Area|Observation|Area\s*\d|Checklists?|$))',
     ]
     for pat in patterns:
         match = re.search(pat, text, re.DOTALL | re.IGNORECASE)
@@ -186,21 +200,40 @@ def _extract_impacted_areas(text: str) -> list:
     """Parse out individual impacted area observations."""
     areas = []
 
-    # split by "Impacted Area N" pattern
-    parts = re.split(r'Impacted\s*Area\s*(\d+)', text, flags=re.IGNORECASE)
+    # try multiple area header patterns (most specific first)
+    area_patterns = [
+        r'Impacted\s*Area\s*(\d+)',
+        r'Affected\s*Area\s*(\d+)',
+        r'Observation\s*Area\s*(\d+)',
+        r'Area\s*(?:of\s*)?(?:Concern|Inspection)\s*(\d+)',
+        r'(?:Location|Zone|Section)\s*(\d+)',
+        r'Area\s*#?\s*(\d+)',
+    ]
 
-    if len(parts) <= 1:
-        # try alternate splitting
-        parts = re.split(r'(?:Negative|Positive)\s*side\s*Description', text, flags=re.IGNORECASE)
+    parts = None
+    for area_pat in area_patterns:
+        parts = re.split(area_pat, text, flags=re.IGNORECASE)
         if len(parts) > 1:
-            for i, part in enumerate(parts[1:], 1):
-                snippet = part[:500].strip()
-                if snippet:
-                    areas.append({
-                        "area_number": i,
-                        "description": snippet,
-                    })
-            return areas
+            break
+
+    if parts is None or len(parts) <= 1:
+        # try alternate splitting by observation markers
+        obs_patterns = [
+            r'(?:Negative|Positive)\s*side\s*(?:Description|Observations?)',
+            r'(?:Damage|Issue)\s*(?:Observed|Description)',
+            r'Observation\s*(?:Details?|Description)',
+        ]
+        for obs_pat in obs_patterns:
+            parts = re.split(obs_pat, text, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                for i, part in enumerate(parts[1:], 1):
+                    snippet = part[:500].strip()
+                    if snippet:
+                        areas.append({
+                            "area_number": i,
+                            "description": snippet,
+                        })
+                return areas
         return areas
 
     # process matched groups
@@ -209,15 +242,26 @@ def _extract_impacted_areas(text: str) -> list:
         area_num = parts[i].strip()
         content = parts[i + 1].strip()
 
-        # extract negative and positive side descriptions
+        # extract negative and positive side descriptions (widened patterns)
         neg_match = re.search(
-            r'Negative\s*side\s*Description\s*(.*?)(?=Positive\s*side|Impacted\s*Area|$)',
+            r'Negative\s*side\s*(?:Description|Observations?)\s*(.*?)(?=Positive\s*side|Impacted\s*Area|Affected\s*Area|Observation\s*Area|Area\s*#?\s*\d|$)',
             content, re.DOTALL | re.IGNORECASE
         )
+        if not neg_match:
+            neg_match = re.search(
+                r'(?:Damage|Issue|Problem)\s*(?:Observed|Description|Details?)\s*:?\s*(.*?)(?=Positive\s*side|Probable\s*(?:Source|Cause)|Impacted|Affected|Area\s*#?\s*\d|$)',
+                content, re.DOTALL | re.IGNORECASE
+            )
+
         pos_match = re.search(
-            r'Positive\s*side\s*Description\s*(.*?)(?=Impacted\s*Area|Negative\s*side|$)',
+            r'Positive\s*side\s*(?:Description|Observations?)\s*(.*?)(?=Impacted\s*Area|Affected\s*Area|Observation\s*Area|Negative\s*side|Area\s*#?\s*\d|$)',
             content, re.DOTALL | re.IGNORECASE
         )
+        if not pos_match:
+            pos_match = re.search(
+                r'(?:Probable\s*(?:Source|Cause)|Source\s*(?:of\s*)?(?:Issue|Problem|Leak))\s*:?\s*(.*?)(?=Impacted|Affected|Negative|Damage|Area\s*#?\s*\d|$)',
+                content, re.DOTALL | re.IGNORECASE
+            )
 
         area = {
             "area_number": int(area_num) if area_num.isdigit() else area_num,
@@ -233,24 +277,32 @@ def _extract_impacted_areas(text: str) -> list:
 
 def _extract_checklists(text: str) -> str:
     """Pull out checklist/inspection findings."""
-    # look for checklist section
-    match = re.search(
-        r'(Checklists?.*?(?=SUMMARY\s*TABLE|Appendix|$))',
-        text, re.DOTALL | re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()[:3000]  # cap it
+    # try multiple patterns for checklist sections
+    checklist_patterns = [
+        r'(Checklists?.*?(?=SUMMARY\s*TABLE|Summary\s*(?:of\s*)?Findings|Appendix|$))',
+        r'(Check\s*List.*?(?=SUMMARY|Summary|Appendix|$))',
+        r'(Inspection\s*(?:Checklist|Findings).*?(?=SUMMARY|Summary|Appendix|$))',
+        r'((?:Site|Building)\s*(?:Checklist|Check\s*List).*?(?=SUMMARY|Summary|Appendix|$))',
+    ]
+    for pat in checklist_patterns:
+        match = re.search(pat, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()[:3000]  # cap it
     return "Not Available"
 
 
 def _extract_summary_table(text: str) -> str:
     """Pull out the summary table if present."""
-    match = re.search(
+    summary_patterns = [
         r'(SUMMARY\s*TABLE.*?)(?=Appendix|Photo\s*1|$)',
-        text, re.DOTALL | re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip()
+        r'(Summary\s*(?:of\s*)?(?:Findings|Observations|Issues).*?)(?=Appendix|Photo|Annexure|$)',
+        r'((?:Observation|Inspection)\s*Summary.*?)(?=Appendix|Photo|Annexure|$)',
+        r'((?:Final|Overall)\s*Summary.*?)(?=Appendix|Photo|Annexure|$)',
+    ]
+    for pat in summary_patterns:
+        match = re.search(pat, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
     return "Not Available"
 
 
@@ -270,38 +322,42 @@ def _parse_thermal_readings(text: str) -> list:
 
         reading = {}
 
-        # hotspot temperature
-        hot = re.search(r'Hotspot\s*:\s*([\d.]+\s*°C)', page_text, re.IGNORECASE)
+        # hotspot temperature — handles: Hotspot, Hot Spot, Max Temp, Maximum Temperature
+        hot = re.search(r'(?:Hot\s*spot|Max(?:imum)?\s*Temp(?:erature)?)\s*:?\s*([\d.]+\s*°?\s*C)', page_text, re.IGNORECASE)
         if hot:
-            reading['hotspot'] = hot.group(1)
+            reading['hotspot'] = hot.group(1).replace(' ', '')
+            if '°' not in reading['hotspot']:
+                reading['hotspot'] = reading['hotspot'].replace('C', ' °C')
 
-        # coldspot temperature
-        cold = re.search(r'Coldspot\s*:\s*([\d.]+\s*°C)', page_text, re.IGNORECASE)
+        # coldspot temperature — handles: Coldspot, Cold Spot, Min Temp, Minimum Temperature
+        cold = re.search(r'(?:Cold\s*spot|Min(?:imum)?\s*Temp(?:erature)?)\s*:?\s*([\d.]+\s*°?\s*C)', page_text, re.IGNORECASE)
         if cold:
-            reading['coldspot'] = cold.group(1)
+            reading['coldspot'] = cold.group(1).replace(' ', '')
+            if '°' not in reading['coldspot']:
+                reading['coldspot'] = reading['coldspot'].replace('C', ' °C')
 
         # emissivity
-        emis = re.search(r'Emissivity\s*:\s*([\d.]+)', page_text, re.IGNORECASE)
+        emis = re.search(r'Emissivity\s*:?\s*([\d.]+)', page_text, re.IGNORECASE)
         if emis:
             reading['emissivity'] = emis.group(1)
 
         # reflected temperature
-        ref = re.search(r'Reflected\s*temperature\s*:\s*([\d.]+\s*°C)', page_text, re.IGNORECASE)
+        ref = re.search(r'Reflected\s*(?:Apparent)?\s*Temp(?:erature)?\s*:?\s*([\d.]+\s*°?\s*C)', page_text, re.IGNORECASE)
         if ref:
             reading['reflected_temp'] = ref.group(1)
 
-        # image filename
-        img = re.search(r'Thermal\s*image\s*:\s*(\S+\.JPG)', page_text, re.IGNORECASE)
+        # image filename — handles .jpg, .jpeg, .png, .bmp, .tiff
+        img = re.search(r'(?:Thermal\s*)?[Ii]mage\s*:?\s*(\S+\.(?:jpe?g|png|bmp|tiff?))', page_text, re.IGNORECASE)
         if img:
             reading['image_file'] = img.group(1)
 
         # device info
-        dev = re.search(r'Device\s*:\s*(.*?)(?:Serial|$)', page_text, re.IGNORECASE)
+        dev = re.search(r'(?:Device|Camera|Equipment)\s*:?\s*(.*?)(?:Serial|\n|$)', page_text, re.IGNORECASE)
         if dev:
             reading['device'] = dev.group(1).strip()
 
-        # date
-        date = re.search(r'(\d{2}/\d{2}/\d{2})', page_text)
+        # date — handles DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, YYYY-MM-DD
+        date = re.search(r'(\d{2}[/\-.]\d{2}[/\-.]\d{2,4}|\d{4}[/\-.]\d{2}[/\-.]\d{2})', page_text)
         if date:
             reading['date'] = date.group(1)
 

@@ -41,14 +41,14 @@ def _build_property_info(inspection_data: dict) -> dict:
     import re
 
     fields_to_find = {
-        "property_type": r'Property\s*Type\s*:?\s*(.*?)(?:\n|$)',
-        "address": r'Address\s*:?\s*(.*?)(?:\n|$)',
-        "floors": r'Floors\s*:?\s*(\d+)',
-        "property_age": r'Property\s*Age.*?:?\s*(\d+)',
-        "inspection_date": r'Inspection\s*Date.*?:?\s*([\d./]+)',
-        "inspected_by": r'Inspected\s*By\s*:?\s*(.*?)(?:\n|$)',
+        "property_type": r'(?:Property|Building|Structure)\s*Type\s*:?\s*(.*?)(?:\n|$)',
+        "address": r'(?:Address|Location|Site\s*Address)\s*:?\s*(.*?)(?:\n|$)',
+        "floors": r'(?:Floors?|Stor(?:ey|ies)|Levels?)\s*:?\s*(\d+)',
+        "property_age": r'(?:Property|Building)\s*Age.*?:?\s*(\d+)',
+        "inspection_date": r'(?:Inspection|Survey|Visit)\s*Date.*?:?\s*([\d./\-]+)',
+        "inspected_by": r'(?:Inspected|Surveyed|Conducted)\s*[Bb]y\s*:?\s*(.*?)(?:\n|$)',
         "previous_repairs": r'Previous\s*Repair.*?:?\s*(Yes|No)',
-        "previous_audit": r'Previous\s*Structural\s*audit.*?:?\s*(Yes|No)',
+        "previous_audit": r'Previous\s*(?:Structural\s*)?[Aa]udit.*?:?\s*(Yes|No)',
     }
 
     for key, pattern in fields_to_find.items():
@@ -79,10 +79,12 @@ def _merge_observations(inspection_data: dict, thermal_data: dict) -> list:
         # try to match thermal readings to this area
         # thermal readings are numbered sequentially, roughly mapping to areas
         area_num = area.get("area_number", 0)
-        if isinstance(area_num, int) and area_num > 0:
-            # thermal images are usually grouped — roughly 2-3 per area
-            start_idx = (area_num - 1) * 3
-            end_idx = min(start_idx + 3, len(thermal_readings))
+        if isinstance(area_num, int) and area_num > 0 and thermal_readings:
+            # dynamically calculate images-per-area ratio instead of hardcoded 3
+            num_areas = len(areas)
+            images_per_area = max(1, len(thermal_readings) // num_areas) if num_areas > 0 else 1
+            start_idx = (area_num - 1) * images_per_area
+            end_idx = min(start_idx + images_per_area, len(thermal_readings))
             related_thermal = thermal_readings[start_idx:end_idx]
 
             if related_thermal:
@@ -154,30 +156,33 @@ def _detect_conflicts(inspection_data: dict, thermal_data: dict) -> list:
     """
     conflicts = []
 
-    # check date consistency
     import re
-    insp_text = inspection_data.get("site_details", "")
-    date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', insp_text)
-    insp_date = date_match.group(1) if date_match else None
 
-    thermal_readings = thermal_data.get("readings", [])
-    thermal_date = thermal_readings[0].get("date") if thermal_readings else None
+    # --- date conflict detection ---
+    try:
+        insp_text = inspection_data.get("site_details", "")
+        # find any date-like pattern in inspection text
+        insp_date_match = re.search(r'(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})', insp_text)
+        insp_date = insp_date_match.group(1) if insp_date_match else None
 
-    if insp_date and thermal_date:
-        # normalize both dates for comparison
-        # inspection might be DD.MM.YYYY, thermal might be DD/MM/YY
-        # just flag if they seem different
-        insp_parts = insp_date.split('.')
-        thermal_parts = thermal_date.split('/')
-        if len(insp_parts) >= 2 and len(thermal_parts) >= 2:
-            if insp_parts[0] != thermal_parts[0] or insp_parts[1] != thermal_parts[1]:
-                conflicts.append({
-                    "type": "date_mismatch",
-                    "detail": f"Inspection date ({insp_date}) differs from thermal scan date ({thermal_date}). "
-                              f"Reports may have been prepared on different days.",
-                })
+        thermal_readings = thermal_data.get("readings", [])
+        thermal_date = thermal_readings[0].get("date") if thermal_readings else None
 
-    # check if number of impacted areas vs thermal images makes sense
+        if insp_date and thermal_date:
+            # normalize both dates — extract day and month parts
+            insp_parts = re.split(r'[./\-]', insp_date)
+            thermal_parts = re.split(r'[./\-]', thermal_date)
+            if len(insp_parts) >= 2 and len(thermal_parts) >= 2:
+                if insp_parts[0] != thermal_parts[0] or insp_parts[1] != thermal_parts[1]:
+                    conflicts.append({
+                        "type": "date_mismatch",
+                        "detail": f"Inspection date ({insp_date}) differs from thermal scan date ({thermal_date}). "
+                                  f"Reports may have been prepared on different days.",
+                    })
+    except (IndexError, KeyError, TypeError):
+        pass  # skip date conflict check if data is malformed
+
+    # --- area vs thermal count mismatch ---
     num_areas = len(inspection_data.get("impacted_areas", []))
     num_thermal = thermal_data.get("num_images", 0)
 
@@ -185,6 +190,11 @@ def _detect_conflicts(inspection_data: dict, thermal_data: dict) -> list:
         conflicts.append({
             "type": "missing_thermal",
             "detail": f"Inspection report has {num_areas} impacted areas, but no thermal readings found.",
+        })
+    elif num_thermal > 0 and num_areas == 0:
+        conflicts.append({
+            "type": "missing_inspection_areas",
+            "detail": f"Thermal report has {num_thermal} readings, but no impacted areas found in inspection.",
         })
 
     return conflicts

@@ -15,6 +15,8 @@ from .prompts import SYSTEM_PROMPT, DDR_GENERATION_PROMPT, VALIDATION_PROMPT
 
 
 MODEL_NAME = "gemini-2.5-flash"
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds
 
 
 def _get_client(api_key: str = None):
@@ -26,6 +28,61 @@ def _get_client(api_key: str = None):
             "Get a free key at: https://aistudio.google.com/apikey"
         )
     return genai.Client(api_key=key)
+
+
+def _call_llm_with_retry(client, model: str, contents: str, config, max_retries: int = MAX_RETRIES) -> str:
+    """
+    Call the LLM with automatic retry on transient failures.
+    Handles rate limits, timeouts, and empty responses.
+    """
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+
+            # guard against empty/None response
+            if response is None or not hasattr(response, 'text') or not response.text:
+                if attempt < max_retries:
+                    print(f"  Empty response from LLM (attempt {attempt}/{max_retries}), retrying...")
+                    time.sleep(RETRY_DELAY * attempt)
+                    continue
+                raise ValueError("LLM returned an empty response after all retries.")
+
+            text = response.text.strip()
+            if len(text) < 50:
+                if attempt < max_retries:
+                    print(f"  Response too short ({len(text)} chars, attempt {attempt}/{max_retries}), retrying...")
+                    time.sleep(RETRY_DELAY * attempt)
+                    continue
+                raise ValueError(f"LLM response too short ({len(text)} chars). May indicate a problem.")
+
+            return text
+
+        except (ValueError, AttributeError) as e:
+            # re-raise our own validation errors on last attempt
+            last_error = e
+            if attempt >= max_retries:
+                raise
+            print(f"  LLM error (attempt {attempt}/{max_retries}): {e}, retrying...")
+            time.sleep(RETRY_DELAY * attempt)
+
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            # retry on rate limit / quota / timeout / server errors
+            if any(keyword in error_str for keyword in ['rate', 'quota', 'timeout', '429', '500', '503', 'overloaded', 'unavailable']):
+                if attempt < max_retries:
+                    wait = RETRY_DELAY * attempt * 2  # longer wait for rate limits
+                    print(f"  Rate limit/server error (attempt {attempt}/{max_retries}), waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+            raise
+
+    raise last_error or RuntimeError("LLM call failed after all retries.")
 
 
 def generate_ddr(merged_data_text: str, api_key: str = None, validate: bool = True) -> dict:
@@ -48,7 +105,8 @@ def generate_ddr(merged_data_text: str, api_key: str = None, validate: bool = Tr
     print("Generating DDR report...")
     start_time = time.time()
 
-    response = client.models.generate_content(
+    report_text = _call_llm_with_retry(
+        client,
         model=MODEL_NAME,
         contents=prompt,
         config=types.GenerateContentConfig(
@@ -59,7 +117,6 @@ def generate_ddr(merged_data_text: str, api_key: str = None, validate: bool = Tr
         ),
     )
 
-    report_text = response.text
     gen_time = time.time() - start_time
     print(f"  Report generated in {gen_time:.1f}s")
 
@@ -84,17 +141,22 @@ def generate_ddr(merged_data_text: str, api_key: str = None, validate: bool = Tr
             generated_report=report_text,
         )
 
-        val_response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=val_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.2,
-                max_output_tokens=2000,
-            ),
-        )
-
-        result["validation"] = val_response.text
+        try:
+            val_text = _call_llm_with_retry(
+                client,
+                model=MODEL_NAME,
+                contents=val_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_output_tokens=2000,
+                ),
+                max_retries=2,  # fewer retries for validation — it's optional
+            )
+            result["validation"] = val_text
+        except Exception as e:
+            print(f"  Validation failed (non-critical): {e}")
+            result["validation"] = f"Validation could not be completed: {str(e)}"
         val_time = time.time() - val_start
         result["metadata"]["validation_time_seconds"] = round(val_time, 1)
         print(f"  Validation done in {val_time:.1f}s")
@@ -138,7 +200,8 @@ def save_report_pdf(report_text: str, output_path: str = None) -> str:
     except ImportError:
         print("fpdf2 not installed. Install with: pip install fpdf2")
         print("Falling back to Markdown output.")
-        return save_report_markdown(report_text, output_path.replace(".pdf", ".md") if output_path else None)
+        fallback_path = output_path.replace(".pdf", ".md") if output_path else None
+        return save_report_markdown(report_text, fallback_path)
 
     if not output_path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -164,6 +227,11 @@ def save_report_pdf(report_text: str, output_path: str = None) -> str:
             '\u2705': '[OK]',
             '\u26a0': '[!]',
             '\u274c': '[X]',
+            '\u2248': '~',     # approximately
+            '\u2265': '>=',    # greater than or equal
+            '\u2264': '<=',    # less than or equal
+            '\u00d7': 'x',     # multiplication sign
+            '\u2103': 'degC',  # degree celsius
         }
         for old, new in replacements.items():
             text = text.replace(old, new)
