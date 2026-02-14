@@ -202,13 +202,13 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
                         mime="application/pdf",
                     )
                 except Exception as e:
-                    logger.info(f"PDF generation failed: {str(e)}. Falling back to Markdown download.")
+                    logging.info(f"PDF generation failed: {str(e)}. Falling back to Markdown download.")
                     raise DDRException(f"PDF generation failed: {str(e)}", sys)
 
             progress.progress(100, text="Done! ✓")
 
         except DDRException as e:
-            logger.error(f"DDR Exception: {str(e)}")
+            logging.error(f"DDR Exception: {str(e)}")
             progress.empty()
             st.error(f"❌ Error: {str(e)}")
             st.exception(e)
