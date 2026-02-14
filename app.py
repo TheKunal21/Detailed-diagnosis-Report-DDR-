@@ -1,13 +1,13 @@
 """
 DDR Report Generator — Streamlit Web App
-Upload inspection + thermal PDFs → get a structured DDR report.
+Upload inspection + thermal PDFs → get a structured DDR report
 """
 
 import os
 import tempfile
 import streamlit as st
 from dotenv import load_dotenv
-from DDR.Logging.logger import logging
+from DDR.Logging.logger import logger
 from DDR.Exception import DDRException
 import sys
 
@@ -16,6 +16,9 @@ load_dotenv()  # load .env file if present
 from DDR.src.pdf_extractor import extract_inspection_report, extract_thermal_report
 from DDR.src.data_processor import merge_inspection_and_thermal, format_merged_data_for_llm
 from DDR.src.report_generator import generate_ddr, save_report_markdown, save_report_pdf
+
+
+logger.info("Starting DDR Report Generator Streamlit app...")
 
 
 # --- Page Config ---
@@ -192,6 +195,7 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
             with dcol2:
                 # PDF download
                 try:
+                    logger.info("Attempting to generate PDF report...")
                     pdf_path = save_report_pdf(report_text)
                     with open(pdf_path, "rb") as f:
                         pdf_bytes = f.read()
@@ -202,13 +206,13 @@ if st.button("🚀 Generate DDR Report", type="primary", use_container_width=Tru
                         mime="application/pdf",
                     )
                 except Exception as e:
-                    logging.info(f"PDF generation failed: {str(e)}. Falling back to Markdown download.")
+                    logger.info(f"PDF generation failed: {str(e)}. Falling back to Markdown download.")
                     raise DDRException(f"PDF generation failed: {str(e)}", sys)
 
             progress.progress(100, text="Done! ✓")
 
         except DDRException as e:
-            logging.error(f"DDR Exception: {str(e)}")
+            logger.error(f"DDR Exception: {str(e)}")
             progress.empty()
             st.error(f"❌ Error: {str(e)}")
             st.exception(e)

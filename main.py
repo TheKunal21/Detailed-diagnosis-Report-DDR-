@@ -16,7 +16,7 @@ from DDR.Exception.exception import DDRException
 from DDR.src.pdf_extractor import extract_inspection_report, extract_thermal_report
 from DDR.src.data_processor import merge_inspection_and_thermal, format_merged_data_for_llm
 from DDR.src.report_generator import generate_ddr, save_report_markdown, save_report_pdf
-from DDR.Logging.logger import logging
+from DDR.Logging.logger import logger
 
 def main():
     load_dotenv()  # load .env file if present
@@ -84,8 +84,8 @@ def main():
         inspection_data = extract_inspection_report(args.inspection)
         print(f"  ✓ Inspection report: {len(inspection_data.get('impacted_areas', []))} impacted areas found")
     except Exception as e:
-        logging.error(f"Failed to extract inspection report: {str(e)}")
-        logging.info("Please check the input PDF format and ensure it contains the expected sections.")
+        logger.error(f"Failed to extract inspection report: {str(e)}")
+        logger.info("Please check the input PDF format and ensure it contains the expected sections.")
         DDRException("Failed to extract inspection report. Check logs for details.", sys)
         sys.exit(1)
 
@@ -93,7 +93,7 @@ def main():
         thermal_data = extract_thermal_report(args.thermal)
         print(f"  ✓ Thermal report: {thermal_data.get('num_images', 0)} thermal readings found")
     except Exception as e:
-        logging.error(f"Failed to extract thermal report: {str(e)}")
+        logger.error(f"Failed to extract thermal report: {str(e)}")
         raise DDRException(e, sys)
 
     # Step 2: Merge
@@ -121,7 +121,7 @@ def main():
             validate=not args.no_validate,
         )
     except Exception as e:
-        logging.error(f"Report generation failed: {str(e)}")
+        logger.error(f"Report generation failed: {str(e)}")
         raise DDRException(e, sys)
 
     report_text = result["report"]
@@ -146,8 +146,8 @@ def main():
             pdf_path = save_report_pdf(report_text, pdf_out)
             output_files.append(pdf_path)
         except Exception as e:
-            logging.error(f"PDF generation failed: {str(e)}")
-            logging.info("Falling back to Markdown output only.")
+            logger.error(f"PDF generation failed: {str(e)}")
+            logger.info("Falling back to Markdown output only.")
             raise DDRException(e,sys)
 
     # save validation results
