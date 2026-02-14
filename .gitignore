@@ -1,0 +1,10 @@
+# ignore
+__pycache__/
+*.pyc
+.env
+output/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
